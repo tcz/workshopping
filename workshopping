@@ -1,0 +1,253 @@
+#!/usr/bin/php
+<?php
+
+define( 'WC_BRANCH', 'workshop_wc' );
+
+if ( $argc !== 2 )
+{
+    $basename = basename( __FILE__ );
+    echo <<<USAGE
+Usage: $basename [repository_path]
+
+1. Prepare your workshop as a git repo. Add small steps
+   (not bigger diff than a screen) as commits with 
+   descriptive commit messages.
+2. Ask students to clone your repository.
+3. Ask them to execute this file with the repository path
+   as parameter.
+4. They can now navigate in your repo with UP and DOWN 
+   buttons. ESC exists the view and leaves the repository
+   with the last selected commit, allowing to try the code
+   in that state.
+
+
+USAGE;
+    exit( -1 );
+}
+
+$repository = $argv[1];
+chdir( $repository );
+
+// Reading directly from input, not line-by-line.
+system("stty raw -echo");
+system("clear");
+register_shutdown_function( function()
+{
+    system("clear");
+    system("stty sane");
+} );
+
+drawScreen( getCurrentCommit() );
+
+$stdin = fopen('php://stdin', 'r');
+
+while( $input = fread( $stdin, 1 ) )
+{ 
+    if ( 27 == ord( $input ) )
+    {
+        // Special characters.
+        $read   = array( $stdin );
+        $write  = NULL;
+        $except = NULL;
+        // We need to wait a little if there are any
+        // characters coming after ESC, because they can
+        // indicate arrows etc.
+        if ( 0 !== ( stream_select( $read, $write, $except, 0, 1000 ) ) ) 
+        {
+            $input .= fread( $stdin, 2 );
+        }
+    }
+    handleKey( $input );
+}
+
+function handleKey( $input )
+{
+    switch( $input )
+    {
+        // UP button
+        case chr( 27 ) . "[A":
+            $current_commit = getCurrentCommit();
+            $new_commit     = getNextCommit( $current_commit );
+            break;
+        // DOWN button
+        case chr( 27 ) . "[B":
+            $current_commit = getCurrentCommit();
+            $new_commit     = getPreviousCommit( $current_commit );
+            break;
+        // Just a normal escape
+        case chr( 27 ):
+            exit();
+        default:
+            echo "\r\n\r\nHit ESC to quit.\r\n";
+            return;
+    }
+
+    if ( $current_commit == $new_commit )
+    {
+        return;
+    }
+
+    drawScreen( $new_commit );
+}
+
+function drawScreen( $commit )
+{
+    checkoutCommit( $commit );
+
+    system("clear");
+    echo getCommitIndex( $commit );
+    echo "/";
+    echo getCommitCount();
+    echo ". ";
+    echo getCurrentCommitMessage();
+    echo "\r\n";
+    echo str_repeat( "_", 50 );
+    echo "\r\n\r\n";
+
+    // Carriage return is needed in this tty mode.
+    echo str_replace( "\n", "\r\n", getChanges( $commit ) );
+}
+
+function checkoutCommit( $commit )
+{
+    if ( !workshopBranchExists() )
+    {
+        execOrFail( "git checkout $commit -b " . WC_BRANCH . " 2>&1" );
+        return;
+    }
+    
+    execOrFail( "git checkout master 2>&1" );
+    execOrFail( "git branch -f " . WC_BRANCH . " $commit 2>&1" );
+    execOrFail( "git checkout " . WC_BRANCH . " 2>&1" );
+}
+
+function getCurrentCommit()
+{
+    if ( workshopBranchExists() )
+    {
+        // Making sure we are in the workshop branch
+        execOrFail( "git checkout " . WC_BRANCH . " 2>&1" );
+        return execOrFail( 'git log -n1 --pretty=\'%H\'' );
+    }
+
+    return getFirstCommit();
+}
+
+function getCommitIndex( $commit )
+{
+    $commits = getAllCommits();
+    $commit_index = array_search( $commit, $commits );
+
+    if ( !isset( $commit_index ) )
+    {
+        return null;
+    }
+
+    // Reverse order
+    return count( $commits ) - $commit_index;
+}
+
+function getCommitCount()
+{
+    return count( getAllCommits() );
+}
+
+function getCurrentCommitMessage()
+{
+    if ( workshopBranchExists() )
+    {
+        // Making sure we are in the workshop branch
+        execOrFail( "git checkout " . WC_BRANCH . " 2>&1" );
+        return execOrFail( 'git log -n1 --pretty=\'%s\'' );
+    }
+
+    return null;
+}
+
+function getChanges( $commit )
+{
+    // We are diffing fo the previous commit.
+    $prev_commit = getPreviousCommit( $commit );
+
+    if ( $prev_commit == $commit )
+    {
+        // First commit, we compare it to the empty repo.
+        $prev_commit = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+    }
+
+    return execOrFail( "git diff --color $prev_commit $commit" );
+}
+
+function workshopBranchExists()
+{
+    $branches = execOrFail( "git branch" );
+    $branches = explode( "\n", $branches );
+    $branches = array_map( function( $branch )
+    {
+        return trim( $branch, "* " );
+    }, $branches );
+
+    return in_array( WC_BRANCH, $branches );
+}
+
+function getNextCommit( $current_commit )
+{
+    $commits = getAllCommits();
+
+    $current_commit_index = array_search( $current_commit, $commits );
+    if ( !isset( $current_commit_index ) || 0 == $current_commit_index )
+    {
+        return $current_commit;
+    }
+
+    return $commits[$current_commit_index - 1];
+}
+
+function getPreviousCommit( $current_commit )
+{
+    $commits = getAllCommits();
+
+    $current_commit_index = array_search( $current_commit, $commits );
+    if ( !isset( $current_commit_index )  || ( count( $commits ) - 1 ) == $current_commit_index )
+    {
+        return $current_commit;
+    }
+
+    return $commits[$current_commit_index + 1];
+}
+
+function getFirstCommit()
+{
+    $commits = getAllCommits();
+    return array_pop( $commits );
+}
+
+function getAllCommits()
+{
+    static $commits;
+
+    if ( isset( $commits ) )
+    {
+        return $commits;
+    }
+
+    // Commits for all branches
+    // Good enough for these simple workshop repos.
+    $commits = execOrFail( 'git log --pretty=%H --branches=*' );
+    $commits = explode( "\n", $commits );
+
+    return $commits;
+}
+
+function execOrFail( $command )
+{
+    exec( $command, $output, $exit_code );
+    $output = implode( "\n", $output );
+
+    if ( 0 !== $exit_code )
+    {
+        echo 'Error: ' . $output;
+        exit( $exit_code );
+    }
+    return $output;
+}
