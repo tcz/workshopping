@@ -175,7 +175,7 @@ function getChanges( $commit )
         $prev_commit = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
     }
 
-    return execOrFail( "git diff --color $prev_commit $commit" );
+    return execOrFail( "git diff --color --unified=10 $prev_commit $commit" );
 }
 
 function workshopBranchExists()
